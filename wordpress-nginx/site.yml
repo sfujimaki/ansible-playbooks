@@ -1,0 +1,6 @@
+---
+- hosts: servers
+  user: admin
+  sudo: yes
+  roles:
+      - wordpress-nginx

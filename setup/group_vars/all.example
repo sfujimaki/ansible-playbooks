@@ -1,0 +1,5 @@
+---
+ssh_port: 10022
+users:
+  - { name: admin,  password: "XXXXXXXXXXXX", groups: "wheel" } # パスワードはハッシュ化したものを使用
+  - { name: user1,  password: "XXXXXXXXXXXX", groups: "wheel" }

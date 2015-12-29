@@ -1,0 +1,4 @@
+---
+- hosts: new-servers
+  roles:
+      - setup

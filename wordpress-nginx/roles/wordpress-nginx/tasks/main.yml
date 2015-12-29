@@ -1,0 +1,180 @@
+---
+- name: Check if selinux is running
+  command: getenforce
+  register: sestatus
+  changed_when: false
+
+- name: Install libselinux-python #
+  yum: name=libselinux-python state=present
+
+# yumリポジトリトリ追加
+- yum: name={{item}} state=present
+  with_items:
+  - http://ftp-srv2.kddilabs.jp/Linux/distributions/fedora/epel/6/x86_64/epel-release-6-8.noarch.rpm
+  - http://rpms.famillecollet.com/enterprise/remi-release-6.rpm
+
+# 明示的にyumリポジトリを設定するために、デフォルトで設定されないようにする。
+- replace: dest=/etc/yum.repos.d/{{item}} regexp="enabled *= *1" replace="enabled=0"
+  with_items:
+  - epel.repo
+  - remi.repo
+
+
+# MySQLのポート開放
+- name: allow MySQL port
+  lineinfile: dest=/etc/sysconfig/iptables line="-A INPUT -m state --state NEW -m tcp -p tcp --dport {{ mysql_port }} -j ACCEPT" insertafter="^:OUTPUT " state=present
+  when: mysql_port is defined
+  notify: restart iptables
+
+# httpポート開放
+- name: allow http port
+  lineinfile: dest=/etc/sysconfig/iptables line="-A INPUT -m state --state NEW -m tcp -p tcp --dport {{ http_port }} -j ACCEPT" insertafter="^:OUTPUT " state=present
+  when: http_port is defined
+  notify: restart iptables
+
+# sshdが起動されている状態
+- name: sshd is enabled and started
+  service: name=sshd state=running enabled=yes
+
+# MySQL関係のインストール&設定
+- name: Install Mysql package # MySQL関係のパッケージをインストール
+  yum: name={{ item }} state=present
+  with_items:
+   - mysql-server
+   - MySQL-python
+   - libselinux-python
+   - libsemanage-python
+
+# http://akiyoko.hatenablog.jp/entry/2014/06/05/221618
+- name: Configure SELinux to start mysql on any port
+  seboolean: name=mysql_connect_any state=true persistent=yes
+  when: sestatus.stdout != "Disabled" #ブログを參考
+
+# MySQL設定(my.cnf)をtemplateからコピー
+- name: Create Mysql configuration file
+  template: src=my.cnf dest=/etc/my.cnf
+  notify:
+  - restart mysql
+
+# MySQLを起動
+- name: Start Mysql Service
+  service: name=mysqld state=started enabled=yes
+
+# ========  nginx関連の設定
+
+# nginxリポジトリを追加 (上のyumリポジトリ追加にマージしても良いかも)
+- name: nginx rpm package attach
+  yum: name=http://nginx.org/packages/centos/6/noarch/RPMS/nginx-release-centos-6-0.el6.ngx.noarch.rpm state=present
+
+#nginxをインストール
+- name: Install nginx
+  yum: name=nginx state=present
+
+# 用意したnginxテンプレートをconf.d以下にコピー
+- name: Copy nginx configuration for wordpress
+  template: src=nginx-wordpress.conf dest=/etc/nginx/conf.d/wordpress.conf
+  notify: restart nginx # テンプレートに変更があったらnginxを再起動
+
+# nginxが起動して、自動起動をオンに
+- name: nginx is runnning and enabled
+  service: name=nginx state=started enabled=yes
+
+# ====  PHP関連のインストール&設定
+
+# PHP関連パッケージをyumインストール
+- name: Install php-fpm and deps
+  yum: name={{ item }} state=present enablerepo=epel
+  with_items:
+    - php
+    - php-fpm
+    - php-mysql
+    - php-mbstring
+    - php-enchant
+    - php-IDNA_Convert
+    - php-PHPMailer
+    - php-process
+    - php-simplepie
+    - php-xml
+
+# gd-lastをインストール(php-gdをインストールするのに必要)
+- name: Install gd-last
+  yum: name=gd-last state=present enablerepo=remi
+
+# php-gdをインストール(WordPressの画像切り抜き機能を使うのに必要)
+- name: Install php-gd
+  yum: name=php-gd state=present enablerepo=remi-php55
+
+# デフォルトのphp-fpm設定を退避
+- name: Disable default pool
+  command: mv /etc/php-fpm.d/www.conf /etc/php-fpm.d/www.disabled creates=/etc/php-fpm.d/www.disabled
+  notify: restart php-fpm
+
+# php-fpmの設定をtemplateからコピー
+- name: Copy php-fpm configuration
+  template: src=php-fpm-wordpress.conf dest=/etc/php-fpm.d/wordpress.conf
+  notify: restart php-fpm
+
+# タイムゾーンを東京に変更
+- name: php is configured
+  lineinfile: dest=/etc/php.ini state=present regexp="^\;date.timezone =$" line="date.timezone = Asia/Tokyo" backrefs=yes
+  notify:
+    - restart nginx
+
+# ====== WordPressインスール
+
+# wordpressグループを作成
+- name: Add group "wordpress"
+  group: name=wordpress
+
+# wordpressユーザーを作成
+- name: Add user "wordpress"
+  user: name=wordpress group=wordpress
+
+# ドキュメントルートディレクトリを作成(hostnameになるようにしてますが、ここはお好みで)
+- name: create hostname directory
+  file: state=directory path=/var/www/{{ server_hostname }} mode=0775 owner=wordpress group=wordpress
+
+# 変数で指定したバージョンのWordPressをダウンロード
+- name: Download WordPress
+  get_url: url=https://ja.wordpress.org/wordpress-{{ wp_version }}-ja.tar.gz dest=/var/www/{{ server_hostname }}/wordpress-{{ wp_version }}-ja.tar.gz sha256sum="{{ wp_sha256sum }}"
+
+# WordPressファイルを解凍。(wpディレクトリがない場合)
+- name: Extract archive
+  command: chdir=/var/www/{{ server_hostname }}/ /bin/tar xvf wordpress-4.3.1-ja.tar.gz creates=/var/www/{{ server_hostname }}/wp
+
+# 解凍したWordPressディレクトリをwpという名前に変更(wpディレクトリがない場合)
+- name: Move WordPress dir.
+  command: mv /var/www/{{ server_hostname }}/wordpress /var/www/{{ server_hostname }}/wp creates=/var/www/{{ server_hostname }}/wp
+
+- name: Fetch random salts for WordPress config
+  local_action: command curl https://api.wordpress.org/secret-key/1.1/salt/
+  register: "wp_salt"
+  sudo: no
+
+# 変数で定義した名前でWordPress用DBを作成
+- name: database for wordpress is created
+  mysql_db: db={{ wp_db_name }} state=present encoding=utf8
+
+# 変数で定義した名前でWordPress用DBユーザーを作成
+- name:  wordpress database user is created
+  mysql_user: name={{ wp_db_user }} password={{ wp_db_password }} priv={{ wp_db_name }}.*:ALL state=present host={{ wp_web_server }}
+
+# WordPressのconfigファイルをテンプレートからコピー
+- name: wordpress is configured
+  template: src=wp-config.php dest=/var/www/{{ server_hostname }}/wp/wp-config.php
+
+# WordPress配置ディレクトリのオーナーをwordpressユーザー・グループに変更
+- name: Change ownership of WordPress installation
+  file: path=/var/www/{{ server_hostname }}/wp owner=wordpress group=wordpress state=directory recurse=yes
+
+# WordPress専用ディレクトリを用意してるので、index.phpをコピー
+- name: copy index.php
+  command: cp -p /var/www/{{ server_hostname }}/wp/index.php /var/www/{{ server_hostname }}/index.php creates=/var/www/{{ server_hostname }}/index.php
+
+# WordPress専用ディレクトリ仕様にindex.phpを変更
+- name: index.php
+  lineinfile: dest=/var/www/{{ server_hostname }}/index.php regexp="/wp-blog-header.php" line="require( dirname( __FILE__ ) . '/wp/wp-blog-header.php' );" state=present backrefs=yes
+
+# php-fpmを起動
+- name: Start php-fpm Service
+  service: name=php-fpm state=started enabled=yes

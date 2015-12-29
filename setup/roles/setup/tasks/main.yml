@@ -1,0 +1,51 @@
+---
+# ユーザー作成
+- name: users exist
+  user: name={{item.name}} state=present password={{item.password}} groups={{item.groups}}
+  with_items: users
+
+# ユーザーディレクトリに.sshディレクトリを作成
+- name: ~/.ssh for users exsit # ssh
+  file: path="/home/{{item.name}}/.ssh" state=directory owner={{item.name}} group={{item.name}} mode=0700
+  with_items: users
+
+# 公開鍵を配置
+- name: authorized keys is deployed
+  copy: src="authorized_keys_for_{{item.name}}" dest="/home/{{item.name}}/.ssh/authorized_keys" owner={{item.name}} group={{item.name}} mode=0600
+  with_items: users
+
+#sudoがインストールを作成
+- name: sudo is installed
+  yum: pkg=sudo state=installed
+
+# 作成したユーザーをsudoersに追加
+- name: allow wheel users to sudo
+  lineinfile: dest=/etc/sudoers regexp="^#\s*(%wheel\s+ALL=\(ALL\)\s+NOPASSWD{{':'}}\s+ALL)" line="\1" backrefs=yes state=present
+
+# templateに配置したiptablesの設定をコピー
+- name: iptables is configured
+  template: src="iptables" dest="/etc/sysconfig/iptables" owner=root group=root mode=0600
+  notify:
+    - restart iptables
+
+# rootでのsshログインを禁止
+- name: disallow root SSH access
+  lineinfile: dest=/etc/ssh/sshd_config regexp="^#PermitRootLogin " line="PermitRootLogin no" state=present
+
+# パスワードでのsshログインを禁止
+- name: disallow password authentication
+  lineinfile: dest=/etc/ssh/sshd_config regexp="^#PasswordAuthentication " line="PasswordAuthentication no" state=present
+
+# sshポート設定
+- name: change SSH port
+  lineinfile: dest=/etc/ssh/sshd_config regexp="^#Port " line="Port {{ ssh_port }}" state=present
+  notify:
+    - restart sshd
+
+#iptablesが起動されている状態に
+- name: iptables is enabled and started
+  service: name=iptables state=started enabled=yes
+
+# sshdが起動されている状態に
+- name: sshd is enabled and starte
+  service: name=sshd state=started enabled=yes
